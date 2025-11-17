@@ -1,3 +1,4 @@
+import time
 import torch
 from tqdm.auto import tqdm
 from transformers import get_scheduler
@@ -108,8 +109,9 @@ def post_process(predicitons, labels):
 
 
 process_bar = tqdm(range(num_train_steps))
-
+time_total_cur = time.time()
 for epoch in range(num_train_epochs):
+    epoch_current = time.time()
     model.train()
     for batch in train_loader:
         outputs = model(**batch)
@@ -144,9 +146,10 @@ for epoch in range(num_train_epochs):
             metric.add_batch(predictions=decode_preds,
                              references=decode_labels)
         res = metric.compute()
-    print(f'epoch: {epoch}, BLUE score: {res['score']:.2f}')
+    print(
+        f'epoch: {epoch}, BLUE score: {res['score']:.2f}, cost:{(time.time() - epoch_current):.2f}')
 
     acclerator.wait_for_everyone()
 
 
-print('ok')
+print(f'ok, total cost: {(time.time() - time_total_cur):.2f}s')
