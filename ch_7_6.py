@@ -27,7 +27,7 @@ def filter_streaming_dataset(dataset, filters):
     total = 0
     for sample in tqdm(iter(dataset)):
         total += 1
-        if any_keyword_in_string(sample["code"], filters):
+        if any_keyword_in_string(sample["content"], filters):
             for k, v in sample.items():
                 filtered_dict[k].append(v)
     print(
@@ -39,9 +39,9 @@ split = "train"  # "valid"
 filters = ["pandas", "sklearn", "matplotlib", "seaborn"]
 
 ds_train = load_dataset(
-    "dipesh/python-code-ds-mini", split="train")
+    "huggingface-course/codeparrot-ds-train", split="train")
 ds_valid = load_dataset(
-    "dipesh/python-code-ds-mini", split="validation")
+    "huggingface-course/codeparrot-ds-valid", split="validation")
 
 raw_datasets = DatasetDict(
     {
@@ -56,7 +56,7 @@ tokenizer = AutoTokenizer.from_pretrained(
     "huggingface-course/code-search-net-tokenizer")
 
 outputs = tokenizer(
-    raw_datasets["train"][:2]["code"],
+    raw_datasets["train"][:2]["content"],
     truncation=True,
     max_length=context_length,
     return_overflowing_tokens=True,
@@ -66,7 +66,7 @@ outputs = tokenizer(
 
 def tokenize(element):
     outputs = tokenizer(
-        element["code"],
+        element["content"],
         truncation=True,
         max_length=context_length,
         return_overflowing_tokens=True,
@@ -92,7 +92,7 @@ config = AutoConfig.from_pretrained(
     eos_token_id=tokenizer.eos_token_id,
 )
 
-model = GPT2LMHeadModel(config)
+model = GPT2LMHeadModel.from_pretrained('CUSGPT2')
 
 
 tokenizer.pad_token = tokenizer.eos_token
@@ -172,7 +172,7 @@ def decodeLogits(logits):
         print("generated >>>\n", generated)
 
 
-def evaluate():
+def evaluate(device):
     model.eval()
     losses = []
     for step, batch in enumerate(eval_dataloader):
@@ -182,24 +182,24 @@ def evaluate():
         losses.append(accelerator.gather(outputs.loss).unsqueeze(0))
     loss = torch.mean(torch.cat(losses))
 
-    if loss < 2.5:
-        txt = """\
-        # create some data
-        x = np.random.randn(100)
-        y = np.random.randn(100)
+    # if loss < 2.99:
+    txt = """\
+    # create some data
+    x = np.random.randn(100)
+    y = np.random.randn(100)
 
-        # create scatter plot with x, y
-        """
-        inputs = tokenizer(
-            txt,
-            truncation=True,
-            max_length=context_length,
-            return_overflowing_tokens=True,
-            return_length=True,
-        )
-        outputs = model(inputs, labels=inputs)
-        decodeLogits(outputs.logits)
-
+    # create scatter plot with x, y
+    """
+    inputs = tokenizer(
+        txt,
+        truncation=True,
+        max_length=context_length,
+        return_overflowing_tokens=True,
+        return_length=True,
+    )
+    outputs = model(torch.tensor(inputs["input_ids"]).to(device))
+    decodeLogits(outputs.logits)
+    model.save_pretrained('CUSGPT2')
     try:
         perplexity = torch.exp(loss)
     except OverflowError:
@@ -207,7 +207,7 @@ def evaluate():
     return loss.item(), perplexity.item()
 
 
-model = GPT2LMHeadModel(config)
+# model = GPT2LMHeadModel(config)
 
 
 optimizer = AdamW(get_grouped_params(model), lr=5e-4)
@@ -264,14 +264,14 @@ for epoch in range(num_train_epochs):
             optimizer.zero_grad()
             completed_steps += 1
         if (step % (eval_steps * gradient_accumulation_steps)) == 0:
-            eval_loss, perplexity = evaluate()
+            eval_loss, perplexity = evaluate(batch["input_ids"].device)
             accelerator.print(
                 {"loss/eval": eval_loss, "perplexity": perplexity})
             model.train()
             accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(
-                output_dir, save_function=accelerator.save)
+            # unwrapped_model = accelerator.unwrap_model(model)
+            # unwrapped_model.save_pretrained(
+            #     output_dir, save_function=accelerator.save)
             if accelerator.is_main_process:
                 tokenizer.save_pretrained(output_dir)
                 # repo.push_to_hub(

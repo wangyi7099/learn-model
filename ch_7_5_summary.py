@@ -1,3 +1,9 @@
+from tqdm.auto import tqdm
+import torch
+from transformers import get_scheduler
+from accelerate import Accelerator
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
 from transformers import Seq2SeqTrainer
 from transformers import DataCollatorForSeq2Seq
 import numpy as np
@@ -134,20 +140,20 @@ logging_steps = len(book_datasets['train']) // batch_size
 model_name = model_checkpoint.split('/')[-1]
 
 
-args = Seq2SeqTrainingArguments(
-    output_dir=model_name,
-    eval_strategy='epoch',
-    learning_rate=5.6e-5,
-    per_device_train_batch_size=batch_size,
-    per_device_eval_batch_size=batch_size,
-    weight_decay=1e-2,
-    save_total_limit=3,
-    num_train_epochs=num_train_epochs,
-    predict_with_generate=True,
-    logging_steps=logging_steps,
-    push_to_hub=False,
-    save_safetensors=True
-)
+# args = Seq2SeqTrainingArguments(
+#     output_dir=model_name,
+#     eval_strategy='epoch',
+#     learning_rate=5.6e-5,
+#     per_device_train_batch_size=batch_size,
+#     per_device_eval_batch_size=batch_size,
+#     weight_decay=1e-2,
+#     save_total_limit=3,
+#     num_train_epochs=num_train_epochs,
+#     predict_with_generate=True,
+#     logging_steps=logging_steps,
+#     push_to_hub=False,
+#     save_safetensors=True
+# )
 
 
 def compute_metrics(eval_pred):
@@ -183,15 +189,110 @@ tokenized_datasets = tokenized_datasets.remove_columns(
 )
 
 
-trainer = Seq2SeqTrainer(
-    model=model,
-    args=args,
-    train_dataset=tokenized_datasets['train'],
-    eval_dataset=tokenized_datasets['validation'],
-    data_collator=data_collator,
-    tokenizer=tokenizer,
-    compute_metrics=compute_metrics
+# trainer = Seq2SeqTrainer(
+#     model=model,
+#     args=args,
+#     train_dataset=tokenized_datasets['train'],
+#     eval_dataset=tokenized_datasets['validation'],
+#     data_collator=data_collator,
+#     tokenizer=tokenizer,
+#     compute_metrics=compute_metrics
+# )
+
+# trainer.train()
+# trainer.evaluate()
+
+
+tokenized_datasets.set_format("torch")
+
+
+batch_size = 8
+train_dataloader = DataLoader(
+    tokenized_datasets['train'],
+    shuffle=True,
+    collate_fn=data_collator,
+    batch_size=batch_size
 )
 
-trainer.train()
-trainer.evaluate()
+eval_dataloader = DataLoader(
+    tokenized_datasets['validation'], collate_fn=data_collator, batch_size=batch_size
+)
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+accelerator = Accelerator()
+
+
+model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader, eval_dataloader)
+
+
+num_train_epochs = 10
+num_update_steps_per_epoch = len(train_dataloader)
+num_train_steps = num_train_epochs * num_update_steps_per_epoch
+
+lr_schedual = get_scheduler('linear', optimizer=optimizer,
+                            num_warmup_steps=0, num_training_steps=num_train_epochs)
+
+
+def postprocess_text(preds, labels):
+    preds = [pred.strip() for pred in preds]
+    labels = [pred.strip() for pred in labels]
+
+    preds = ['\n'.join(nltk.sent_tokenize(pred)) for pred in preds]
+    labels = ['\n'.join(nltk.sent_tokenize(pred)) for pred in labels]
+
+    return preds, labels
+
+
+process_bar = tqdm(range(num_train_steps))
+
+
+for epoch in range(num_train_epochs):
+    for step, batch in enumerate(train_dataloader):
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+
+        optimizer.step()
+        lr_schedual.step()
+        optimizer.zero_grad()
+        process_bar.update(1)
+
+    model.eval()
+    for step, batch in enumerate(eval_dataloader):
+        with torch.no_grad():
+            generated_token = accelerator.unwrap_model(model).generate(
+                batch['input_ids'],
+                attention_mask=batch['attention_mask']
+            )
+
+            generated_token = accelerator.pad_across_processes(
+                generated_token, dim=1, pad_index=tokenizer.pad_token_id
+            )
+
+            labels = batch["labels"]
+
+            labels = accelerator.gather(labels).cpu().numpy()
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+            if isinstance(generated_token, tuple):
+                generated_token = generated_token[0]
+            decoded_preds = tokenizer.batch_decode(
+                generated_token, skip_special_tokens=True)
+            decoded_labels = tokenizer.batch_decode(
+                labels, skip_special_tokens=True)
+
+            decoded_preds, decoded_labels = postprocess_text(
+                decoded_preds, decoded_preds
+            )
+
+            rouge_score.add_batch(predictions=decoded_preds,
+                                  references=decoded_labels)
+
+        result = rouge_score.compute()
+        result = {key: value * 100 for key, value in result.items()}
+
+        print(f'Epoch {epoch}:', result)
+
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(model_name)

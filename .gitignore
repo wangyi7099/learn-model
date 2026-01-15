@@ -1,2 +1,7 @@
 mt5-small
 codeparrot-ds-accelerate
+sft_output
+CUSTOM_BERT
+CUSGPT2
+codeparrot-ds
+bert-finetuned-squad
