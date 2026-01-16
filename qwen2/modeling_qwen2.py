@@ -28,7 +28,7 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
-from .configuration_qwen2 import Qwen2Config
+from configuration_qwen2 import Qwen2Config
 
 
 class Qwen2MLP(nn.Module):

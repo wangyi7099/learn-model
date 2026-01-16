@@ -18,7 +18,7 @@ from transformers.utils import TransformersKwargs, auto_docstring, logging
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
 from transformers.utils.import_utils import get_torch_version
-from ..llama.modeling_llama import (
+from transformers.models.llama.modeling_llama import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
@@ -30,8 +30,8 @@ from ..llama.modeling_llama import (
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
-from ..mistral.modeling_mistral import MistralModel
-from .configuration_qwen2 import Qwen2Config
+from transformers.models.mistral.modeling_mistral import MistralModel
+from configuration_qwen2 import Qwen2Config
 
 
 logger = logging.get_logger(__name__)
