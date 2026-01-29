@@ -1,3 +1,5 @@
+from transformers.processing_utils import Unpack
+from transformers.integrations import use_kernel_forward_from_hub
 import jieba
 import d2l_cp as d2l
 import math
@@ -5,8 +7,11 @@ import pandas as pd
 import torch
 from torch import nn
 import matplotlib
-from transformers.models.mistral.modeling_mistral import MistralModel
-
+from transformers import PreTrainedModel, GenerationMixin
+from transformers.configuration_utils import PretrainedConfig
+from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
+from typing import Callable, Optional, Union
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 matplotlib.use('Agg')  # 设置非交互式后端
 
 
@@ -86,23 +91,66 @@ class DecoderBlock(nn.Module):
         return self.addnormal3(Z, self.ffn(Z)), state
 
 
-class TransformerDecoder(MistralModel):
-    def __init__(self, vocab_size, num_hiddens, norm_shape, ffn_num_input, ffn_num_hiddens,
-                 num_heads, num_layers, dropout, **kwargs):
-        super(TransformerDecoder, self).__init__(**kwargs)
+class DecoderOnlyModelConfig(PretrainedConfig):
+    def __init__(self, vocab_size, num_hiddens, norm_shape, ffn_num_input, ffn_num_hiddens, num_heads, num_layers, dropout, rms_norm_eps, **kwargs):
+        self.vocab_size = vocab_size
         self.num_hiddens = num_hiddens
+        self.norm_shape = norm_shape
+        self.ffn_num_input = ffn_num_input
+        self.ffn_num_hiddens = ffn_num_hiddens
+        self.num_heads = num_heads
         self.num_layers = num_layers
-        self.embedding = nn.Embedding(vocab_size, num_hiddens)
-        self.pos_encoding = d2l.PositionalEncoding(num_hiddens, dropout)
+        self.dropout = dropout
+        self.rms_norm_eps = rms_norm_eps
+        super().__init__(
+            **kwargs,
+        )
+        pass
+
+
+@use_kernel_forward_from_hub("RMSNorm")
+class Qwen2RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps: float = 1e-6) -> None:
+        """
+        Qwen2RMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * \
+            torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
+class QWEN2RotaryEmbedding(nn.Module):
+    def __init__(self, config: DecoderOnlyModelConfig, device=None):
+        super().__init__()
+
+
+class DecoderModel(PreTrainedModel):
+    def __init__(self, config: DecoderOnlyModelConfig):
+        super().__init__(config)
+        self.num_hiddens = config.num_hiddens
+        self.num_layers = config.num_layers
+        self.embedding = nn.Embedding(config.vocab_size, num_hiddens)
+        self.pos_encoding = d2l.PositionalEncoding(
+            config.num_hiddens, config.dropout)
         self.blks = nn.Sequential()
+        self.norm = Qwen2RMSNorm(config.num_hiddens, eps=config.rms_norm_eps)
+        self.rotary_emb = QWEN2RotaryEmbedding(config=config)
         for i in range(num_layers):
             self.blks.add_module("block"+str(i),
-                                 DecoderBlock(num_hiddens, norm_shape, ffn_num_input, ffn_num_hiddens,
-                                              num_heads, dropout, i))
-        self.dense = nn.Linear(num_hiddens, vocab_size)
-
-    def init_state(self, enc_outputs, enc_valid_lens, *args):
-        return [enc_outputs, enc_valid_lens, [None] * self.num_layers]
+                                 DecoderBlock(config.num_hiddens, config.norm_shape, config.ffn_num_input, config.ffn_num_hiddens,
+                                              config.num_heads, config.dropout, i))
+        self.dense = nn.Linear(config.num_hiddens, config.vocab_size)
 
     def forward(self, X, state):
         X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
@@ -120,6 +168,78 @@ class TransformerDecoder(MistralModel):
     @property
     def attention_weights(self):
         return self._attention_weights
+
+
+class DecoderOnlyModelDecoder(PreTrainedModel, GenerationMixin):
+    # def __init__(self, vocab_size, num_hiddens, norm_shape, ffn_num_input, ffn_num_hiddens,
+    #              num_heads, num_layers, dropout, **kwargs):
+    def __init__(self, config: DecoderOnlyModelConfig):
+        super().__init__(config)
+        self.model = DecoderModel(config)
+        self.lm_head = nn.Linear(
+            config.num_hiddens, config.vocab_size, bias=False)
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPast:
+        r"""
+        Example:
+
+        ```python
+        >>> from transformers import AutoTokenizer, Qwen2ForCausalLM
+
+        >>> model = Qwen2ForCausalLM.from_pretrained("meta-qwen2/Qwen2-2-7b-hf")
+        >>> tokenizer = AutoTokenizer.from_pretrained("meta-qwen2/Qwen2-2-7b-hf")
+
+        >>> prompt = "Hey, are you conscious? Can you talk to me?"
+        >>> inputs = tokenizer(prompt, return_tensors="pt")
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+        ```"""
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        slice_indices = slice(-logits_to_keep,
+                              None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(
+                logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 num_hiddens, num_layers, dropout, batch_size, num_steps = 32, 2, 0.1, 64, 50
