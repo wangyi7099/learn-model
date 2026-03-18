@@ -5,3 +5,4 @@ CUSTOM_BERT
 CUSGPT2
 codeparrot-ds
 bert-finetuned-squad
+my_tokenizer

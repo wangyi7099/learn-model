@@ -249,9 +249,9 @@ if __name__ == '__main__':
     torch.save(net.state_dict(), 'model_weights.pth')  # 只有14KB
 
 
-# engs = ['go .', "i lost .", 'he\'s calm .', 'i\'m home .']
-# fras = ['va !', 'j\'ai perdu .', 'il est calme .', 'je suis chez moi .']
-# for eng, fra in zip(engs, fras):
-#     translation, dec_attention_weight_seq = d2l.predict_seq2seq(
-#         net, eng, src_vocab, tgt_vocab, num_steps, device, True)
-#     print(f'{eng} => {translation}, ')
+engs = ['go .', "i lost .", 'he\'s calm .', 'i\'m home .']
+fras = ['va !', 'j\'ai perdu .', 'il est calme .', 'je suis chez moi .']
+for eng, fra in zip(engs, fras):
+    translation, dec_attention_weight_seq = d2l.predict_seq2seq(
+        net, eng, src_vocab, tgt_vocab, num_steps, device, True)
+    print(f'{eng} => {translation}, ')
